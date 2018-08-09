@@ -1,0 +1,22 @@
+{
+  "name": "telegram-group-guard",
+  "version": "0.0.3",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hmsuorg/telegram-group-guard.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/hmsuorg/telegram-group-guard/issues"
+  },
+  "homepage": "https://github.com/hmsuorg/telegram-group-guard#readme",
+  "dependencies": {
+    "telebot": "^1.2.6"
+  }
+}
