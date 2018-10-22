@@ -1,138 +1,136 @@
-const log = (msg) => { console.log(`[${new Date().toISOString().replace(/T/, " ")}] ${msg}`); }
 const fs = require("fs");
-const telebot = require("telebot");
-const botToken = process.argv[2];
-const groupId = Number(process.argv[3]);
-const bot = new telebot(botToken);
-const userMessage = user => `Здрасти, @${userToString(user)}! Пиши ни нещо, да знаем че не си бот... ;)`;
-const replyInterval = 5; // new users must reply in X minutes
+const { Composer } = require("micro-bot");
+const fastify = require("fastify")({ logger: false });
+const log = msg => {
+	msg = `[${new Date().toISOString()}] ${msg}`;
+	console.log(msg);
+	logBuffer.push(msg);
+	if(logBuffer.length > 50) logBuffer.shift();
+};
+const groupId = Number(process.env.GROUP_ID);
+const verifiedStorage = "verified.json";
+const verificationPeriod = 5; // new chat memebers must reply in X minutes
+const memberToString = member => member.username || `${member.first_name || ""} ${member.last_name || ""}`.trim() || member.id;
+const memberGreeting = member => `Здрасти, ${memberToString(member)}! Пиши ни нещо, да знаем че не си бот... ;)`;
+let logBuffer = [];
+let verified = [];
 let unknown = [];
-let humans = [];
 let msgBuffer = {};
 
 try {
-	fs.readFile("humans.json", (err, data) => {
+	fs.readFile(verifiedStorage, (err, data) => {
 		if (err) {
-			log(err);
-			return;
+			throw err;
 		}
 		try {
-			humans = JSON.parse(data);
-			log(`Loaded ${humans.length} human(s) from storage`);
-		} catch(e) {
-			log(`Loading storage failed: ${e}`);
-			console.log(e);
+			verified = JSON.parse(data);
+			log(`Loaded ${verified.length} verified member(s) from storage`);
+		} catch(err) {
+			log(`Loading storage failed`);
+			throw err;
 		}
 	});
-} catch(e) {
-	log(`Reading file failed: ${e}`);
-	console.log(e);
+} catch(err) {
+	log(`Reading file failed`);
+	throw err;
 }
 
-Array.prototype.remove = function(elem) {
-	return this.splice(this.indexOf(elem), 1);
-}
-
-const userToString = user => {
-	return user.username || `${user.first_name || ""} ${user.last_name || ""}`.trim() || user.id;
-};
-
-const syncHumans = id => {
+const syncVerified = id => {
 	try {
-		fs.writeFile("humans.json", JSON.stringify(humans), (err) => {
+		fs.writeFile(verifiedStorage, JSON.stringify(verified), (err) => {
 			if (err) {
 				throw err;
 			} else {
-				log(`Human users array synced to storage`);
+				log(`Verified members array synced with storage`);
 			}
 		});
-	} catch (e) {
-		log(`Failed to sync storage to filesystem`);
-		console.log(e);
+	} catch (err) {
+		log(`Writing file failed`);
+		throw err;
 	}
 };
 
-const handleNewChatMember = (msg, bot_id) => {
-	//if(msg.chat.type !== "group" || msg.chat.type !== "supergroup") {
-	//	return;
-	//}
+const addMemberMessage = (memberId, messageId) => {
+	if(msgBuffer.hasOwnProperty(memberId)) {
+		msgBuffer[memberId].push(messageId);
+	} else {
+		msgBuffer[memberId] = [messageId];
+	}
+};
 
-	if(msg.chat.id !== groupId) {
+const deleteMemberMessages = (ctx, chatId, memberId) => {
+	msgBuffer[memberId].forEach(messageId => {
+		ctx.telegram.deleteMessage(chatId, messageId)
+			.catch(err => console.warn('ctx.telegram.deleteMessage error: ', err));
+	});
+
+	delete msgBuffer[memberId];
+};
+
+const handleNewChatMembers = ctx => {
+	if(ctx.update.message.chat.id !== groupId) {
 		return;
 	}
 
-	if(msg.new_chat_member.id === bot_id.id) {
-		log(`The bot has joined a channel`);
-		return;
-	}
+	ctx.update.message.new_chat_members.forEach((member) => {
+		if(member.id === ctx.botInfo.id) {
+			log(`${memberToString(ctx.botInfo)} bot has joined a channel`);
+			return;
+		}
 
-	msg.new_chat_members.forEach((member) => {
-		if(!humans.includes(member.id)) {
+		if(verified.includes(member.id)) {
+			log(`${memberToString(member)} has joined and is a verified member`);
+		} else {
 			unknown.push(member.id);
-			log(`${userToString(member)} has joined the channel and is added to unknown users array`);
+			log(`${memberToString(member)} has joined and is added to the unknown members array`);
 
-			bot.sendMessage(msg.chat.id, userMessage(member))
-				.then(m => addUserMessage(member.id, m.message_id))
-				.catch(err => console.warn('sendMessage error: ', err));
+			log(`${memberToString(ctx.botInfo)}: ${memberGreeting(member)}`);
+			ctx.reply(memberGreeting(member))
+				.then(message => addMemberMessage(member.id, message.message_id))
+				.catch(err => console.warn('ctx.reply error: ', err));
 
 			setTimeout((memberId, chatId) => {
 				if(unknown.includes(memberId)) {
-					log(`${userToString(member)} did not reply on time, kicking...`);
-					deleteUserMessages(chatId, memberId);
-					bot.kickChatMember(chatId, memberId).catch(err => console.warn('kickChatMember error: ', err));
-					unknown.remove(memberId);
+					log(`${memberToString(member)} did not reply on time, kicking...`);
+					ctx.kickChatMember(memberId)
+						.catch(err => console.warn('ctx.kickChatMember error: ', err));
+					deleteMemberMessages(ctx, chatId, memberId);
+					unknown = unknown.filter(item => item !== memberId);
 				}
-			}, replyInterval * 1000 * 60, member.id, msg.chat.id);
+			}, verificationPeriod * 1000 * 60, member.id, ctx.update.message.chat.id);
 
-			log(`${userToString(member)} has been messaged, waiting for a reply...`);
-		} else {
-			log(`${userToString(member)} has joined the channel and is a known human`);
+			log(`${memberToString(member)} has been messaged, waiting for a reply...`);
 		}
 	});
 };
 
-const addUserMessage = (userId, messageId) => {
-	if(msgBuffer.hasOwnProperty(userId)) {
-		msgBuffer[userId].push(messageId);
-	} else {
-		msgBuffer[userId] = [messageId];
-	}
-};
+const handleMessage = ctx => {
+	if(ctx.update.message.chat.id === groupId) {
+		log(`${memberToString(ctx.update.message.from)}: ${ctx.update.message.text}`);
 
-const deleteUserMessages = (chatId, userId) => {
-	msgBuffer[userId].forEach(messageId => {
-		bot.deleteMessage(chatId, messageId).catch(err => console.warn('deleteMessage error: ', err));
-	});
+		if(unknown.includes(ctx.update.message.from.id)) {
+			addMemberMessage(ctx.update.message.from.id, ctx.update.message.message_id);
+			unknown = unknown.filter(item => item !== ctx.update.message.from.id);
+			verified.push(ctx.update.message.from.id);
+			log(`${memberToString(ctx.update.message.from)} has responded and is moved to the verified members array`);
 
-	delete msgBuffer[userId];
-};
-
-const handleMessage = msg => {
-	//if(msg.chat.type === "group" || msg.chat.type === "supergroup") {
-	if(msg.chat.id === groupId) {
-		log(`${userToString(msg.from)}: ${msg.text}`);
-
-		if(unknown.includes(msg.from.id)) {
-			addUserMessage(msg.from.id, msg.message_id);
-			unknown.remove(msg.from.id);
-			humans.push(msg.from.id);
-			log(`${userToString(msg.from)} has responded to message and is moved to human users array`);
-
-			syncHumans(msg.from.id);
-			deleteUserMessages(msg.chat.id, msg.from.id);
+			syncVerified(ctx.update.message.from.id);
+			deleteMemberMessages(ctx, ctx.update.message.chat.id, ctx.update.message.from.id);
 		}
 	} else {
-		log(`Message outside scope >> (id: ${msg.chat.id}, username: ${msg.chat.username}, type: ${msg.chat.type}) >> ${userToString(msg.from)}: ${msg.text}`);
+		log(`Message outside scope >> (id: ${ctx.update.message.chat.id}, username: ${ctx.update.message.from.username}, type: ${ctx.update.message.chat.type}) >> ${memberToString(ctx.update.message.from)}: ${ctx.update.message.text}`);
 	}
 };
 
-bot.getMe().then(bot_id => {
-	bot.on("newChatMembers", msg => {
-		handleNewChatMember(msg, bot_id);
-	});
-	bot.on("text", msg => {
-		handleMessage(msg);
-	});
+const bot = new Composer();
+
+bot.on("text", ctx => handleMessage(ctx));
+bot.on("new_chat_members", ctx => handleNewChatMembers(ctx));
+
+fastify.get("/log", (request, reply) => reply.send(logBuffer.join("\n")));
+fastify.listen(3000, (err, address) => {
+	if (err) throw err;
+	fastify.log.info(`Server listening on ${address}`);
 });
 
-bot.start();
+module.exports = bot;
